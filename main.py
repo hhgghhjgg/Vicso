@@ -8,19 +8,19 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import Command
 
-# تنظیمات لاگ برای ثبت رویدادهای ربات
+# تنظیمات لاگ سرور
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# دریافت توکن ربات و آدرس وب‌هوک از متغیرهای محیطی هاست
+# دریافت توکن و آدرس سرور از Render
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 if not BOT_TOKEN:
-    raise ValueError("خطا: توکن ربات (BOT_TOKEN) یافت نشد!")
+    raise ValueError("خطا: متغیر BOT_TOKEN ست نشده است!")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -32,14 +32,13 @@ WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}" if RENDER_EXTERNAL_URL else
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """تنظیم فرآیند ثبت و بستن وب‌هوک تلگرام در سرور"""
     if WEBHOOK_URL:
-        logger.info(f"در حال تنظیم وب‌هوک روی: {WEBHOOK_URL}")
+        logger.info(f"Setting webhook to: {WEBHOOK_URL}")
         await bot.set_webhook(url=WEBHOOK_URL, drop_pending_updates=True)
     else:
-        logger.warning("RENDER_EXTERNAL_URL تعریف نشده است؛ فرآیند وب‌هوک ثبت نشد.")
+        logger.warning("RENDER_EXTERNAL_URL یافت نشد.")
     yield
-    logger.info("در حال اتمام سشن ارتباطی با سرورهای تلگرام...")
+    logger.info("Closing bot session...")
     await bot.session.close()
 
 
@@ -48,18 +47,17 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "ربات تمپلت‌بات فعال است."}
+    return {"status": "ok", "message": "Template Bot is running!"}
 
 
 @app.post(WEBHOOK_PATH)
 async def bot_webhook(request: Request):
-    """دریافت به‌روزرسانی‌های تلگرام و هدایت به دیسپچر اصلی"""
     try:
         json_data = await request.json()
         update = types.Update.model_validate(json_data, context={"bot": bot})
         await dp.feed_update(bot, update)
     except Exception as e:
-        logger.error(f"خطا در پردازش وب‌هوک: {e}")
+        logger.error(f"Error processing webhook: {e}")
     return {"ok": True}
 
 
@@ -67,13 +65,12 @@ async def bot_webhook(request: Request):
 async def cmd_start(message: types.Message):
     await message.answer(
         "👋 به ربات تمپلت‌بات خوش آمدید!\n\n"
-        "هر پستی را برای من ارسال کنید تا فرمت آن را کاملاً حفظ کنم، کلمه «منبع» را در جای درست در "
-        "کنار لینک‌ها یا آیدی‌های موجود در متن قرار دهم و امضای انتهای پست شما را اضافه کنم."
+        "من فرمت پست‌های شما را حفظ می‌کنم. آخرین آیدی یا لینک تلگرام موجود در انتهای متن را "
+        "شناسایی کرده و کلمه «منبع» را در کنار آن قرار می‌دهم. تمام لینک‌های دیگر در بالای متن دست‌نخورده باقی می‌مانند."
     )
 
 
 async def process_text_and_add_template(message: types.Message) -> str:
-    """تحلیل هوشمند متن و لینک‌ها و الحاق امضای بهینه‌شده به انتها"""
     original_html = ""
 
     if message.text:
@@ -81,10 +78,11 @@ async def process_text_and_add_template(message: types.Message) -> str:
     elif message.caption:
         original_html = message.html_text
 
-    # تعریف آیدی‌های تبلیغاتی که نباید به عنوان منبع علامت‌گذاری شوند
+    # آیدی‌های تبلیغاتی ثابت شما که نباید به عنوان منبع علامت‌گذاری شوند
     ignored_usernames = {"manhwalist_ir", "manhwa_list_ir", "eryuanovel"}
     
     has_custom_source = False
+    processed_html = original_html
 
     def is_valid_tg_source(url_or_text: str) -> bool:
         """بررسی اینکه آیا لینک وارد شده یک منبع تلگرامی و غیرتبلیغاتی است"""
@@ -98,62 +96,70 @@ async def process_text_and_add_template(message: types.Message) -> str:
             return True
         return False
 
-    # مرحله اول: جستجو و پردازش هایپرلینک‌های مخفی HTML (تگ‌های <a>)
-    def process_a_tags(html_text: str) -> str:
-        nonlocal has_custom_source
-        pattern = re.compile(r'(<a\s+href="([^"]+)"[^>]*>(.*?)</a>)(?:\s*منبع)?', re.IGNORECASE | re.DOTALL)
+    if original_html:
+        # تعریف الگوها برای انواع لینک‌ها و آیدی‌ها در کل متن
+        a_tag_pattern = r'(<a\s+href="([^"]+)"[^>]*>(.*?)</a>)(?:\s*منبع)?'
+        tag_pattern = r"(<[^>]+>)"
+        username_pattern = r"(@([a-zA-Z0-9_]+)(?:\s*منبع)?)"
+        link_pattern = r"(((?:https?://)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)/(?:joinchat/|\+)?([a-zA-Z0-9_]{5,32}|[a-zA-Z0-9_\-\+]+))(?:\s*منبع)?)"
         
-        def replace(match):
-            nonlocal has_custom_source
-            full_tag = match.group(1)
-            url = match.group(2)
-            inner_text = match.group(3)
+        # ترکیب الگوها برای بررسی گام به گام متن از بالا به پایین
+        combined_pattern = re.compile(
+            f"{a_tag_pattern}|{tag_pattern}|{username_pattern}|{link_pattern}", 
+            re.IGNORECASE | re.DOTALL
+        )
+        
+        matches = list(combined_pattern.finditer(original_html))
+        
+        # گشتن به دنبال "آخرین" مورد منطبق معتبر از انتهای متن به سمت بالا
+        last_valid_match = None
+        for m in reversed(matches):
+            if m.group(1):  # هایپرلینک تگ <a>
+                url = m.group(2)
+                if is_valid_tg_source(url):
+                    last_valid_match = m
+                    break
+            elif m.group(4):  # تگ HTML معمولی (نادیده گرفته شود)
+                continue
+            elif m.group(5):  # آیدی ساده تلگرام با @
+                username = m.group(6)
+                if username.lower() not in ignored_usernames:
+                    last_valid_match = m
+                    break
+            elif m.group(7):  # لینک مستقیم متنی تلگرام
+                channel_name = m.group(9)
+                if channel_name.lower() not in ignored_usernames:
+                    last_valid_match = m
+                    break
+        
+        # اعمال تغییر کلمه «منبع» فقط و فقط روی آخرین مورد یافت شده در کل متن
+        if last_valid_match:
+            has_custom_source = True
+            start = last_valid_match.start()
+            end = last_valid_match.end()
+            matched_str = original_html[start:end]
             
-            if is_valid_tg_source(url):
-                has_custom_source = True
-                # اگر کلمه منبع از قبل وجود داشت، مجدداً تکرار نشود
-                if "منبع" in inner_text or "منبع" in full_tag:
-                    return full_tag
-                return f"{full_tag} منبع"
-            return match.group(0)
-        
-        return pattern.sub(replace, html_text)
-
-    processed_html = process_a_tags(original_html) if original_html else ""
-
-    # مرحله دوم: پردازش آیدی‌های ساده (@) و لینک‌های متنی تلگرام (بدون تگ HTML)
-    tag_pattern = r"(<[^>]+>)"
-    username_pattern = r"(@([a-zA-Z0-9_]+)(?:\s*منبع)?)"
-    link_pattern = r"(((?:https?://)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)/(?:joinchat/|\+)?([a-zA-Z0-9_]{5,32}|[a-zA-Z0-9_\-\+]+))(?:\s*منبع)?)"
-    
-    combined_pattern = re.compile(f"{tag_pattern}|{username_pattern}|{link_pattern}", re.IGNORECASE)
-    
-    def replace_plain(match):
-        nonlocal has_custom_source
-        if match.group(1):  # اگر تگ HTML خام باشد، بدون تغییر عبور کند
-            return match.group(1)
-        
-        elif match.group(2):  # آیدی تلگرام ساده مثل @username
-            username = match.group(3)
-            if username.lower() not in ignored_usernames:
-                has_custom_source = True
-                return f"@{username} منبع"
-            return f"@{username}"
+            if last_valid_match.group(1):  # هایپرلینک تگ <a>
+                full_tag = last_valid_match.group(1)
+                inner_text = last_valid_match.group(3)
+                # اگر از قبل کلمه منبع در متن تگ یا بعد از آن بود تکرار نشود
+                if "منبع" in inner_text or "منبع" in matched_str:
+                    new_sub = matched_str
+                else:
+                    new_sub = f"{full_tag} منبع"
+            elif last_valid_match.group(5):  # آیدی ساده تلگرام
+                username = last_valid_match.group(6)
+                new_sub = f"@{username} منبع"
+            elif last_valid_match.group(7):  # لینک متنی مستقیم
+                link = last_valid_match.group(8)
+                new_sub = f"{link} منبع"
+            else:
+                new_sub = matched_str
             
-        elif match.group(4):  # لینک متنی تلگرام مثل https://t.me/username
-            link_without_source = match.group(5)
-            channel_name = match.group(6)
-            if channel_name.lower() not in ignored_usernames:
-                has_custom_source = True
-                return f"{link_without_source} منبع"
-            return link_without_source
-        
-        return match.group(0)
+            # بازسازی متن نهایی با تغییر انحصاریِ آخرین آیدی/لینک
+            processed_html = original_html[:start] + new_sub + original_html[end:]
 
-    if processed_html:
-        processed_html = combined_pattern.sub(replace_plain, processed_html)
-
-    # امضای نهایی کانال (عقرب‌ها و دکمه‌های ری‌اکشن شبیه‌سازی‌شده)
+    # امضای نهایی کانال (بدون هیچ آیدی اضافی یا تکراری)
     base_promo = """🦂🦂🦂🦂🦂🦂🦂🦂🦂🦂🦂🦂
 🔊@manhwalist_ir
 🫂@manhwa_list_ir
@@ -161,14 +167,12 @@ async def process_text_and_add_template(message: types.Message) -> str:
 ˡᶦᵏᵉ  ᶜᵒᵐᵐᵉⁿᵗ    ˢᵃᵛᵉ     ˢʰᵃʳᵉ"""
 
     if has_custom_source:
-        # اگر منبع داخل متن شناسایی شد، امضای کانال بلافاصله در خط بعد درج می‌شود
         template = base_promo
         if processed_html:
             final_text = f"{processed_html}\n{template}"
         else:
             final_text = template
     else:
-        # اگر هیچ منبعی در متن یافت نشد، منبع پیش‌فرض اعمال می‌شود
         template = f"@Eryuanovel منبع\n{base_promo}"
         if processed_html:
             final_text = f"{processed_html}\n\n{template}"
@@ -235,11 +239,10 @@ async def handle_all_messages(message: types.Message):
                 disable_web_page_preview=True,
             )
     except Exception as e:
-        logger.error(f"Error sending formatted message: {e}")
+        logger.error(f"Error sending message: {e}")
         await message.answer(
-            "⚠️ مشکلی در پردازش یا ارسال مجدد پیام پیش آمد. متن یا کپشن پیام را بررسی کنید."
+            "⚠️ مشکلی در پردازش یا ارسال این پیام پیش آمد. فرمت پیام یا حجم آن را بررسی کنید."
         )
 
 
-# ثبت کدهای روتر در دیسپچر اصلی
 dp.include_router(router)
