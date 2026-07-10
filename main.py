@@ -8,19 +8,19 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import Command
 
-# تنظیمات لاگ سرور برای خطایابی دقیق
+# تنظیمات لاگ سرور
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# دریافت توکن و آدرس سرور از تنظیمات هاست (Environment Variables)
+# دریافت توکن و آدرس سرور از Render
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 if not BOT_TOKEN:
-    raise ValueError("خطا: توکن ربات (BOT_TOKEN) در متغیرهای محیطی یافت نشد!")
+    raise ValueError("خطا: متغیر BOT_TOKEN ست نشده است!")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -32,14 +32,13 @@ WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}" if RENDER_EXTERNAL_URL else
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """مدیریت فرآیند وب‌هوک هنگام روشن و خاموش شدن سرور"""
     if WEBHOOK_URL:
-        logger.info(f"در حال اتصال وب‌هوک به: {WEBHOOK_URL}")
+        logger.info(f"Setting webhook to: {WEBHOOK_URL}")
         await bot.set_webhook(url=WEBHOOK_URL, drop_pending_updates=True)
     else:
-        logger.warning("RENDER_EXTERNAL_URL تعریف نشده است؛ وب‌هوک ست نشد.")
+        logger.warning("RENDER_EXTERNAL_URL یافت نشد.")
     yield
-    logger.info("در حال قطع اتصال سشن با تلگرام...")
+    logger.info("Closing bot session...")
     await bot.session.close()
 
 
@@ -48,7 +47,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "ربات فعال است."}
+    return {"status": "ok", "message": "Template Bot is running!"}
 
 
 @app.post(WEBHOOK_PATH)
@@ -58,22 +57,40 @@ async def bot_webhook(request: Request):
         update = types.Update.model_validate(json_data, context={"bot": bot})
         await dp.feed_update(bot, update)
     except Exception as e:
-        logger.error(f"خطا در دریافت و ثبت آپدیت وب‌هوک: {e}")
+        logger.error(f"Error processing webhook: {e}")
     return {"ok": True}
 
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 سلام به ربات تمپلت‌بات خوش آمدید!\n\n"
-        "هر پستی (متن خالی، عکس‌دار، ویدیو، گیف، ویس و...) را برام بفرست تا قالب‌بندی متنت "
-        "(بولد، کج، لینک‌ها و...) رو کاملاً حفظ کنم، جلوی آیدی‌های داخل متن کلمه «منبع» رو بذارم "
-        "و امضای کانال رو در انتهای اون قرار بدم."
+        "👋 به ربات تمپلت‌بات خوش آمدید!\n\n"
+        "من فرمت پست‌های شما را حفظ می‌کنم. جلوی آیدی‌های منبع داخل متن کلمه «منبع» را اضافه کرده "
+        "و امضای کانال را در انتهای آن قرار می‌دهم."
     )
 
 
+def insert_source_next_to_usernames(html_text: str) -> str:
+    """پیدا کردن آیدی‌ها و نوشتن کلمه منبع جلوی آن‌ها (بدون تکرار و بدون خراب کردن تگ‌های HTML)"""
+    # لیست آیدی‌هایی که نباید کلمه منبع جلوی آن‌ها قرار بگیرد
+    ignored_usernames = {"manhwalist_ir", "manhwa_list_ir"}
+
+    # رگکس هوشمند برای تطبیق تگ‌های HTML یا آیدی‌هایی که ممکن است از قبل کلمه منبع جلویشان باشد
+    pattern = re.compile(r"(<[^>]+>)|@([a-zA-Z0-9_]+)(?:\s*منبع)?")
+
+    def replace_match(match):
+        if match.group(1):  # تگ HTML است، بدون تغییر عبور کند
+            return match.group(1)
+        else:  # آیدی تلگرام است
+            username = match.group(2)
+            if username.lower() not in ignored_usernames:
+                return f"@{username} منبع"
+            return f"@{username}"
+
+    return pattern.sub(replace_match, html_text)
+
+
 async def process_text_and_add_template(message: types.Message) -> str:
-    """دریافت متن، پردازش آیدی‌های منبع و چسباندن امضای نهایی"""
     original_html = ""
 
     if message.text:
@@ -81,48 +98,22 @@ async def process_text_and_add_template(message: types.Message) -> str:
     elif message.caption:
         original_html = message.html_text
 
-    # آیدی‌های تبلیغاتی ثابت شما که نباید کلمه «منبع» جلوی آن‌ها قرار بگیرد
-    ignored_usernames = {"manhwalist_ir", "manhwa_list_ir", "eryuanovel"}
-    
-    has_custom_source = False
+    # پردازش آیدی‌های داخل متن
+    processed_html = (
+        insert_source_next_to_usernames(original_html) if original_html else ""
+    )
 
-    # الگوی رگکس برای تشخیص تگ‌های HTML یا آیدی‌ها به منظور حفظ لینک‌ها و استایل‌ها
-    pattern = re.compile(r"(<[^>]+>)|@([a-zA-Z0-9_]+)")
-
-    def replace_match(match):
-        nonlocal has_custom_source
-        if match.group(1):  # اگر تگ HTML باشد، آن را بدون دستکاری برگردان
-            return match.group(1)
-        else:  # اگر آیدی تلگرام باشد
-            username = match.group(2)
-            if username.lower() not in ignored_usernames:
-                has_custom_source = True
-                return f"@{username} منبع"
-            return f"@{username}"
-
-    processed_html = pattern.sub(replace_match, original_html) if original_html else ""
-
-    # امضای ثابت و نهایی کانال شما شامل عقرب‌ها و آیکون‌ها
-    base_promo = """🦂🦂🦂🦂🦂🦂🦂🦂🦂🦂🦂🦂
+    # امضای نهایی و اصلی کانال (بدون هیچ آیدی متفرقه یا اضافی)
+    template = """🦂🦂🦂🦂🦂🦂🦂🦂🦂🦂🦂🦂
 🔊@manhwalist_ir
 🫂@manhwa_list_ir
 ♡ ㅤ    ❍ㅤ     ⎙ㅤ     ⌲
 ˡᶦᵏᵉ  ᶜᵒᵐᵐᵉⁿᵗ    ˢᵃᵛᵉ     ˢʰᵃʳᵉ"""
 
-    if has_custom_source:
-        # اگر آیدی منبع در متن یافت شد، امضا بدون آیدی Eryuanovel در خط بعد شروع می‌شود
-        template = base_promo
-        if processed_html:
-            final_text = f"{processed_html}\n{template}"
-        else:
-            final_text = template
+    if processed_html:
+        final_text = f"{processed_html}\n{template}"
     else:
-        # اگر هیچ آیدی منبعی در متن یافت نشد، منبع پیش‌فرض اعمال می‌شود
-        template = f"@Eryuanovel منبع\n{base_promo}"
-        if processed_html:
-            final_text = f"{processed_html}\n\n{template}"
-        else:
-            final_text = template
+        final_text = template
 
     return final_text
 
@@ -184,9 +175,9 @@ async def handle_all_messages(message: types.Message):
                 disable_web_page_preview=True,
             )
     except Exception as e:
-        logger.error(f"Error sending processed post: {e}")
+        logger.error(f"Error sending message: {e}")
         await message.answer(
-            "⚠️ خطایی در آماده‌سازی یا ارسال این پست رخ داد. لطفاً فرمت یا حجم متن را بررسی کنید."
+            "⚠️ خطایی رخ داد. فرمت یا حجم متن را بررسی کنید."
         )
 
 
