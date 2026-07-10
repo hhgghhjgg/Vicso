@@ -159,10 +159,11 @@ async def process_text_and_add_template(message: types.Message) -> str:
             # بازسازی متن نهایی با تغییر انحصاریِ آخرین آیدی/لینک
             processed_html = original_html[:start] + new_sub + original_html[end:]
 
-    # امضای نهایی کانال (بدون هیچ آیدی اضافی یا تکراری)
+    # امضای جدید و نهایی کانال شما (طبق درخواست آخر)
     base_promo = """🦂🦂🦂🦂🦂🦂🦂🦂🦂🦂🦂🦂
 🔊@manhwalist_ir
 🫂@manhwa_list_ir
+⋆༺ 𝟏𝟖 ─ 𝟏𝟗 ༻⋆
 ♡ ㅤ    ❍ㅤ     ⎙ㅤ     ⌲
 ˡᶦᵏᵉ  ᶜᵒᵐᵐᵉⁿᵗ    ˢᵃᵛᵉ     ˢʰᵃʳᵉ"""
 
