@@ -8,18 +8,21 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import Command
 
-# تنظیمات لاگ برای خطایابی بهتر
-logging.basicConfig(level=logging.INFO)
+# تنظیمات پیشرفته لاگ برای پیگیری وضعیت ربات و خطاهای احتمالی
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-# خواندن متغیرهای محیطی
+# دریافت توکن و آدرس وب‌هوک از متغیرهای محیطی Render
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 if not BOT_TOKEN:
-    raise ValueError("متغیر BOT_TOKEN تنظیم نشده است!")
+    raise ValueError("خطا: متغیر BOT_TOKEN در تنظیمات Render ست نشده است!")
 
-# تعریف ربات و دیسپچر
+# تعریف ربات با موتور پردازش پیام aiogram
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
@@ -30,95 +33,104 @@ WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}" if RENDER_EXTERNAL_URL else
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # تنظیم وب‌هوک هنگام شروع برنامه روی سرور
+    """مدیریت چرخه حیات سرور و تنظیم اتصال وب‌هوک تلگرام"""
     if WEBHOOK_URL:
-        logger.info(f"Setting webhook to: {WEBHOOK_URL}")
+        logger.info(f"در حال تنظیم وب‌هوک روی آدرس: {WEBHOOK_URL}")
+        # تنظیم وب‌هوک و پاک کردن پیام‌های در صف انتظار قبلی برای جلوگیری از تداخل
         await bot.set_webhook(url=WEBHOOK_URL, drop_pending_updates=True)
     else:
-        logger.warning("RENDER_EXTERNAL_URL یافت نشد. وب‌هوک تنظیم نشد.")
+        logger.warning("هشدار: متغیر RENDER_EXTERNAL_URL یافت نشد. وب‌هوک تنظیم نشد.")
     yield
-    # بستن سشن ربات هنگام خاموش شدن سرور
-    logger.info("Closing bot session...")
+    logger.info("در حال بستن سشن ارتباطی با تلگرام...")
     await bot.session.close()
 
 
+# ایجاد فریم‌ورک وب FastAPI
 app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/")
 async def root():
-    return {"status": "running"}
+    """تست سالم بودن سرور"""
+    return {"status": "ok", "message": "Template Bot is running!"}
 
 
 @app.post(WEBHOOK_PATH)
 async def bot_webhook(request: Request):
+    """دریافت آپدیت‌ها از تلگرام و ارسال به دیسپچر ربات"""
     try:
         json_data = await request.json()
         update = types.Update.model_validate(json_data, context={"bot": bot})
         await dp.feed_update(bot, update)
     except Exception as e:
-        logger.error(f"Error processing update: {e}")
+        logger.error(f"خطا در پردازش وب‌هوک دریافتی: {e}")
     return {"ok": True}
 
 
-# هندلر دستور /start
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
+    """پاسخ به دستور استارت ربات"""
     await message.answer(
-        "سلام به ربات تمپلت‌بات خوش آمدید!\n\n"
-        "هر پستی (متن خالی، عکس‌دار، ویدیو، گیف و...) را برای من بفرستید تا قالب‌بندی متن شما "
-        "(بولد، کج، لینک‌ها و...) را حفظ کرده و امضای کانال شما را به انتهای آن اضافه کنم."
+        "👋 به ربات تمپلت‌بات خوش آمدید!\n\n"
+        "هر پستی (متن خالی، عکس‌دار، ویدیو، گیف، ویس و...) را برای من بفرستید تا قالب‌بندی آن "
+        "(بولد، کج، لینک‌ها و...) را کاملاً حفظ کنم، جلوی آیدی‌های داخل متن کلمه «منبع» را اضافه کنم "
+        "و امضای کانال شما را در انتها قرار دهم."
     )
 
 
-# تابع کمکی برای پردازش متن و اضافه کردن قالب نهایی
+def insert_source_next_to_usernames(html_text: str) -> str:
+    """پیدا کردن آیدی‌ها در متن و قرار دادن کلمه «منبع» در کنار آن‌ها بدون خراب کردن تگ‌های HTML"""
+    # لیست آیدی‌هایی که تبلیغاتی هستند و نباید کلمه منبع جلوی آن‌ها قرار بگیرد
+    ignored_usernames = {"manhwalist_ir", "manhwa_list_ir", "eryuanovel"}
+
+    # الگو برای تفکیک تگ‌های HTML از آیدی‌های ساده تلگرام
+    pattern = re.compile(r"(<[^>]+>)|@([a-zA-Z0-9_]+)")
+
+    def replace_match(match):
+        if match.group(1):  # اگر تگ HTML باشد (بدون تغییر عبور بده)
+            return match.group(1)
+        else:  # اگر آیدی تلگرام باشد
+            username = match.group(2)
+            if username.lower() not in ignored_usernames:
+                return f"@{username} منبع"
+            return f"@{username}"
+
+    return pattern.sub(replace_match, html_text)
+
+
 async def process_text_and_add_template(message: types.Message) -> str:
-    raw_text = ""
+    """دریافت متن پیام، پردازش آیدی‌ها و الحاق امضا در انتها"""
     original_html = ""
 
-    # بررسی وجود متن یا کپشن
     if message.text:
-        raw_text = message.text
         original_html = message.html_text
     elif message.caption:
-        raw_text = message.caption
         original_html = message.html_text
 
-    # استخراج تمام آیدی‌های دارای @ برای پیدا کردن منبع
-    # آیدی‌های تبلیغاتی ثابت شما نادیده گرفته می‌شوند تا به عنوان منبع مجدد تکرار نشوند
-    ignored_usernames = {"manhwalist_ir", "manhwa_list_ir", "eryuanovel"}
-    found_usernames = re.findall(r"@([a-zA-Z0-9_]+)", raw_text)
+    # قرار دادن کلمه «منبع» در کنار آیدی‌های متن اصلی
+    processed_html = (
+        insert_source_next_to_usernames(original_html) if original_html else ""
+    )
 
-    unique_sources = []
-    for username in found_usernames:
-        if username.lower() not in ignored_usernames:
-            unique_sources.append(f"@{username} منبع")
-
-    # انتخاب منبع بر اساس آیدی‌های یافت شده
-    if unique_sources:
-        source_line = "\n".join(unique_sources)
-    else:
-        source_line = "@Eryuanovel منبع"
-
-    # قالب متنی نهایی ارسالی کاربر
-    template = f"""{source_line} 
+    # امضای نهایی و قالب ثابت شما
+    template = """@Eryuanovel منبع 
 🦂🦂🦂🦂🦂🦂🦂🦂🦂🦂🦂🦂
 🔊@manhwalist_ir
 🫂@manhwa_list_ir
 ♡ ㅤ    ❍ㅤ     ⎙ㅤ     ⌲
 ˡᶦᵏᵉ  ᶜᵒᵐᵐᵉⁿᵗ    ˢᵃᵛᵉ     ˢʰᵃʳᵉ"""
 
-    if original_html:
-        final_text = f"{original_html}\n\n{template}"
+    if processed_html:
+        final_text = f"{processed_html}\n\n{template}"
     else:
         final_text = template
 
     return final_text
 
 
-# هندلر پردازش تمام پیام‌ها و انواع مدیا
 @router.message()
 async def handle_all_messages(message: types.Message):
+    """دریافت انواع پیام‌ها و رسانه‌ها و ارسال نسخه اصلاح‌شده به کاربر"""
     if message.text and message.text.startswith("/"):
         return
 
@@ -168,17 +180,18 @@ async def handle_all_messages(message: types.Message):
                 parse_mode=ParseMode.HTML,
             )
         else:
+            # ارسال متن برای سایر موارد ناشناخته
             await message.answer(
                 text=final_text,
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
             )
     except Exception as e:
-        logger.error(f"Failed to send formatted message: {e}")
+        logger.error(f"خطا در ارسال پیام اصلاح‌شده: {e}")
         await message.answer(
-            "⚠️ خطایی در پردازش یا ارسال پست رخ داد. حجم یا فرمت فایل ارسالی را بررسی کنید."
+            "⚠️ متأسفانه خطایی در پردازش یا ارسال این پست رخ داد. حجم یا تعداد کلمات پیام را بررسی کنید."
         )
 
 
-# ثبت هندلرها در دیسپچر
+# ثبت مسیرهای پردازشی ربات در دیسپچر اصلی
 dp.include_router(router)
